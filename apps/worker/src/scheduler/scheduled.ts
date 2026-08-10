@@ -30,6 +30,11 @@ import {
   type PublicMonitorRuntimeSnapshot,
 } from '../public/monitor-runtime';
 import { readSettings } from '../settings';
+import {
+  hasMaintenanceBoundarySince,
+  readHomepageArtifactLastUpdatedAt,
+} from '../snapshots/public-homepage-read';
+import { shouldReconcilePublicSnapshot } from '../snapshots/public-snapshot-policy';
 import { acquireLease, releaseLease } from './lock';
 import { LeaseLostError, startRenewableLease } from './lease-guard';
 import type { NotifyContext } from './notifications';
@@ -1896,12 +1901,22 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
     return { module: notificationsModule, notify };
   };
 
+  const shouldQueueIdleHomepageRefresh = async (): Promise<boolean> => {
+    const lastRefreshAt = await readHomepageArtifactLastUpdatedAt(env.DB);
+    if (lastRefreshAt === null || shouldReconcilePublicSnapshot(lastRefreshAt, now)) {
+      return true;
+    }
+    return await hasMaintenanceBoundarySince(env.DB, lastRefreshAt, now);
+  };
+
   const queueIdleWork = async (): Promise<void> => {
     if (shouldLogScheduledRefresh(env)) {
       console.log('scheduled: idle no runnable monitors');
     }
     await initializeNotifications();
-    ctx.waitUntil(queueHomepageRefresh());
+    if (await shouldQueueIdleHomepageRefresh()) {
+      ctx.waitUntil(queueHomepageRefresh());
+    }
   };
 
   if (!(await hasSchedulableMonitors(env.DB))) {
@@ -1935,8 +1950,10 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
         return;
       }
       await initializeNotifications();
-      schedulerLease.assertHeld('queueing homepage refresh');
-      ctx.waitUntil(queueHomepageRefresh());
+      if (await shouldQueueIdleHomepageRefresh()) {
+        schedulerLease.assertHeld('queueing homepage refresh');
+        ctx.waitUntil(queueHomepageRefresh());
+      }
       return;
     }
 

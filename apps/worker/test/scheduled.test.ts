@@ -40,6 +40,14 @@ vi.mock('../src/internal/homepage-refresh-core', async (importOriginal) => {
 vi.mock('../src/snapshots', () => ({
   refreshPublicHomepageSnapshotIfNeeded: vi.fn(),
 }));
+vi.mock('../src/snapshots/public-homepage-read', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/snapshots/public-homepage-read')>();
+  return {
+    ...actual,
+    hasMaintenanceBoundarySince: vi.fn(),
+    readHomepageArtifactLastUpdatedAt: vi.fn(),
+  };
+});
 
 import type { Env } from '../src/env';
 import { runInternalHomepageRefreshCore } from '../src/internal/homepage-refresh-core';
@@ -57,6 +65,11 @@ import {
 import { LeaseLostError } from '../src/scheduler/lease-guard';
 import { acquireLease, releaseLease, renewLease } from '../src/scheduler/lock';
 import { refreshPublicHomepageSnapshotIfNeeded } from '../src/snapshots';
+import {
+  hasMaintenanceBoundarySince,
+  readHomepageArtifactLastUpdatedAt,
+} from '../src/snapshots/public-homepage-read';
+import { PUBLIC_SNAPSHOT_IDLE_RECONCILIATION_SECONDS } from '../src/snapshots/public-snapshot-policy';
 import { readSettings } from '../src/settings';
 import { createFakeD1Database, type FakeD1QueryHandler } from './helpers/fake-d1';
 
@@ -230,6 +243,8 @@ describe('scheduler/scheduled regression', () => {
       monitors: [],
     });
     vi.mocked(refreshPublicHomepageSnapshotIfNeeded).mockResolvedValue(false);
+    vi.mocked(hasMaintenanceBoundarySince).mockResolvedValue(false);
+    vi.mocked(readHomepageArtifactLastUpdatedAt).mockResolvedValue(null);
     vi.mocked(runHttpCheck).mockResolvedValue({
       status: 'up',
       latencyMs: 21,
@@ -331,10 +346,32 @@ describe('scheduler/scheduled regression', () => {
     await expect(listMonitorRowsByIds(env.DB, [0, -1])).resolves.toEqual([]);
   });
 
-  it('queues homepage refresh when monitors are runnable but none are due', async () => {
+  it('skips idle public refresh while the latest artifact remains within the age target', async () => {
+    vi.setSystemTime(new Date('2026-02-17T00:01:42.000Z'));
+    const now = Math.floor(Date.now() / 1000);
+    vi.mocked(readHomepageArtifactLastUpdatedAt).mockResolvedValueOnce(
+      now - PUBLIC_SNAPSHOT_IDLE_RECONCILIATION_SECONDS + 1,
+    );
+    const env = createEnv({ dueRows: [] });
+    const waitUntil = vi.fn();
+
+    await runScheduledTick(env, { waitUntil } as unknown as ExecutionContext);
+
+    expect(acquireLease).toHaveBeenCalledTimes(1);
+    expect(releaseLease).toHaveBeenCalledTimes(1);
+    expect(readHomepageArtifactLastUpdatedAt).toHaveBeenCalledWith(env.DB);
+    expect(waitUntil).not.toHaveBeenCalled();
+    expect(refreshPublicHomepageSnapshotIfNeeded).not.toHaveBeenCalled();
+  });
+
+  it('queues homepage refresh once artifact age reaches the target despite wall-clock drift', async () => {
+    vi.setSystemTime(new Date('2026-02-17T00:10:42.000Z'));
     const env = createEnv({ dueRows: [] });
     const waitUntil = vi.fn();
     const expectedNow = Math.floor(Date.now() / 1000);
+    vi.mocked(readHomepageArtifactLastUpdatedAt).mockResolvedValueOnce(
+      expectedNow - PUBLIC_SNAPSHOT_IDLE_RECONCILIATION_SECONDS,
+    );
 
     await runScheduledTick(env, { waitUntil } as unknown as ExecutionContext);
 
@@ -355,6 +392,40 @@ describe('scheduler/scheduled regression', () => {
       baseSnapshot: null,
       baseSnapshotBodyJson: null,
     });
+    expect(readHomepageArtifactLastUpdatedAt).toHaveBeenCalledWith(env.DB);
+  });
+
+  it('queues homepage refresh when maintenance changes within a fresh artifact window', async () => {
+    const env = createEnv({ dueRows: [] });
+    const waitUntil = vi.fn();
+    const now = Math.floor(Date.now() / 1000);
+    const lastRefreshAt = now - 60;
+    vi.mocked(readHomepageArtifactLastUpdatedAt).mockResolvedValueOnce(lastRefreshAt);
+    vi.mocked(hasMaintenanceBoundarySince).mockResolvedValueOnce(true);
+
+    await runScheduledTick(env, { waitUntil } as unknown as ExecutionContext);
+
+    expect(hasMaintenanceBoundarySince).toHaveBeenCalledWith(env.DB, lastRefreshAt, now);
+    expect(waitUntil).toHaveBeenCalledTimes(1);
+    await Promise.all(waitUntil.mock.calls.map((call) => call[0] as Promise<unknown>));
+    expect(refreshPublicHomepageSnapshotIfNeeded).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips a fresh idle public artifact when no monitors are schedulable', async () => {
+    vi.setSystemTime(new Date('2026-02-17T00:01:42.000Z'));
+    const now = Math.floor(Date.now() / 1000);
+    vi.mocked(readHomepageArtifactLastUpdatedAt).mockResolvedValueOnce(
+      now - PUBLIC_SNAPSHOT_IDLE_RECONCILIATION_SECONDS + 1,
+    );
+    const env = createEnv({ dueRows: [], schedulableMonitorPresent: false });
+    const waitUntil = vi.fn();
+
+    await runScheduledTick(env, { waitUntil } as unknown as ExecutionContext);
+
+    expect(acquireLease).not.toHaveBeenCalled();
+    expect(readHomepageArtifactLastUpdatedAt).toHaveBeenCalledWith(env.DB);
+    expect(waitUntil).not.toHaveBeenCalled();
+    expect(refreshPublicHomepageSnapshotIfNeeded).not.toHaveBeenCalled();
   });
 
   it('skips monitor scheduling but keeps idle public refresh and maintenance notifications', async () => {

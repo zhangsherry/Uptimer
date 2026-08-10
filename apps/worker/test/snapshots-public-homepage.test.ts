@@ -28,11 +28,17 @@ import {
   writeHomepageSnapshot,
 } from '../src/snapshots/public-homepage';
 import {
+  hasMaintenanceBoundarySince,
+  readHomepageArtifactLastUpdatedAt,
   readCachedHomepageRefreshBaseSnapshot,
   readHomepageRefreshBaseSnapshot,
   readHomepageSnapshotJsonAnyAge,
   readStaleHomepageSnapshotArtifactJson as readStaleHomepageSnapshotArtifactJsonHot,
 } from '../src/snapshots/public-homepage-read';
+import {
+  PUBLIC_SNAPSHOT_IDLE_RECONCILIATION_SECONDS,
+  shouldReconcilePublicSnapshot,
+} from '../src/snapshots/public-snapshot-policy';
 import { createFakeD1Database } from './helpers/fake-d1';
 
 function samplePayload(now = 1_728_000_000) {
@@ -116,6 +122,56 @@ describe('snapshots/public-homepage', () => {
     expect(getHomepageSnapshotKey()).toBe('homepage');
     expect(getHomepageSnapshotMaxAgeSeconds()).toBe(60);
     expect(getHomepageSnapshotMaxStaleSeconds()).toBe(600);
+    expect(PUBLIC_SNAPSHOT_IDLE_RECONCILIATION_SECONDS + 60).toBeLessThan(
+      getHomepageSnapshotMaxStaleSeconds(),
+    );
+  });
+
+  it('reads the dedicated artifact refresh time instead of a newer homepage payload time', async () => {
+    const db = createFakeD1Database([
+      {
+        match: 'select key, generated_at, updated_at from public_snapshots',
+        all: () => [
+          { key: 'homepage', generated_at: 100, updated_at: 160 },
+          { key: 'homepage:artifact', generated_at: 110, updated_at: 140 },
+        ],
+      },
+    ]);
+
+    await expect(readHomepageArtifactLastUpdatedAt(db)).resolves.toBe(140);
+  });
+
+  it('detects maintenance boundaries since the latest artifact refresh', async () => {
+    const db = createFakeD1Database([
+      {
+        match: 'select 1 as boundary from maintenance_windows',
+        first: (args) => {
+          expect(args).toEqual([100, 200]);
+          return { boundary: 1 };
+        },
+      },
+    ]);
+
+    await expect(hasMaintenanceBoundarySince(db, 100, 200)).resolves.toBe(true);
+  });
+
+  it('reconciles idle snapshots by elapsed refresh age instead of wall-clock boundaries', () => {
+    const lastRefreshAt = 1_000;
+
+    expect(
+      shouldReconcilePublicSnapshot(
+        lastRefreshAt,
+        lastRefreshAt + PUBLIC_SNAPSHOT_IDLE_RECONCILIATION_SECONDS - 1,
+      ),
+    ).toBe(false);
+    expect(
+      shouldReconcilePublicSnapshot(
+        lastRefreshAt,
+        lastRefreshAt + PUBLIC_SNAPSHOT_IDLE_RECONCILIATION_SECONDS,
+      ),
+    ).toBe(true);
+    expect(shouldReconcilePublicSnapshot(null, lastRefreshAt)).toBe(true);
+    expect(shouldReconcilePublicSnapshot(lastRefreshAt + 1, lastRefreshAt)).toBe(true);
   });
 
   it('builds compact render artifacts with an embedded snapshot object', () => {

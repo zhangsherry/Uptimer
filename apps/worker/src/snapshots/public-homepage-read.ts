@@ -36,10 +36,21 @@ const READ_REFRESH_SNAPSHOT_METADATA_ROW_BY_KEY_SQL = `
   FROM public_snapshots
   WHERE key = ?1
 `;
+const READ_MAINTENANCE_BOUNDARY_SINCE_SQL = `
+  SELECT 1 AS boundary
+  FROM maintenance_windows
+  WHERE (starts_at > ?1 AND starts_at <= ?2)
+     OR (ends_at > ?1 AND ends_at <= ?2)
+  LIMIT 1
+`;
 const readRefreshSnapshotMetadataStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const readRefreshSnapshotRowsStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const readRefreshSnapshotRowByKeyStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const readRefreshSnapshotMetadataRowByKeyStatementByDb = new WeakMap<
+  D1Database,
+  D1PreparedStatement
+>();
+const readMaintenanceBoundarySinceStatementByDb = new WeakMap<
   D1Database,
   D1PreparedStatement
 >();
@@ -566,6 +577,45 @@ async function readRefreshSnapshotMetadataRows(
     }
     console.warn('homepage snapshot: refresh metadata read failed', err);
     return [];
+  }
+}
+
+export async function readHomepageArtifactLastUpdatedAt(
+  db: D1Database,
+): Promise<number | null> {
+  const rows = await readRefreshSnapshotMetadataRows(db);
+  const artifactRow = rows.find((row) => row.key === SNAPSHOT_ARTIFACT_KEY);
+  const fallbackHomepageRow = rows.find((row) => row.key === SNAPSHOT_KEY);
+  const selectedRow = artifactRow ?? fallbackHomepageRow;
+  if (!selectedRow) {
+    return null;
+  }
+
+  const updatedAt = toSnapshotUpdatedAt(selectedRow);
+  return updatedAt >= 0 ? updatedAt : null;
+}
+
+export async function hasMaintenanceBoundarySince(
+  db: D1Database,
+  sinceExclusive: number,
+  now: number,
+): Promise<boolean> {
+  if (now <= sinceExclusive) {
+    return false;
+  }
+
+  try {
+    const cached = readMaintenanceBoundarySinceStatementByDb.get(db);
+    const statement = cached ?? db.prepare(READ_MAINTENANCE_BOUNDARY_SINCE_SQL);
+    if (!cached) {
+      readMaintenanceBoundarySinceStatementByDb.set(db, statement);
+    }
+    return (await statement.bind(sinceExclusive, now).first<{ boundary: number }>()) !== null;
+  } catch (err) {
+    if (!isNoFakeD1HandlerError(err)) {
+      console.warn('homepage snapshot: maintenance boundary read failed', err);
+    }
+    return false;
   }
 }
 
