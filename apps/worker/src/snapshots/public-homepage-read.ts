@@ -1,7 +1,5 @@
 import { AppError } from '../middleware/errors';
-import {
-  type PublicHomepageResponse,
-} from '../schemas/public-homepage';
+import { type PublicHomepageResponse } from '../schemas/public-homepage';
 import {
   publicHomepageStoredRenderArtifactSchema,
   storedPublicHomepageResponseSchema,
@@ -265,7 +263,10 @@ function normalizeHomepagePayloadBodyJsonForKey(
     : null;
 }
 
-function normalizeHomepageArtifactBodyJson(bodyJson: string, expectedGeneratedAt?: number): string | null {
+function normalizeHomepageArtifactBodyJson(
+  bodyJson: string,
+  expectedGeneratedAt?: number,
+): string | null {
   const parsed = parseJsonText(bodyJson);
   if (parsed === null) return null;
 
@@ -537,9 +538,7 @@ function snapshotCandidateUpdatedAgeSeconds(candidate: SnapshotCandidate, now: n
   return Math.max(0, now - candidate.updatedAt);
 }
 
-async function readRefreshSnapshotRows(
-  db: D1Database,
-): Promise<SnapshotRefreshRow[]> {
+async function readRefreshSnapshotRows(db: D1Database): Promise<SnapshotRefreshRow[]> {
   try {
     const cached = readRefreshSnapshotRowsStatementByDb.get(db);
     const statement = cached ?? db.prepare(READ_REFRESH_SNAPSHOT_ROWS_SQL);
@@ -777,12 +776,7 @@ async function readValidatedSnapshotCandidate(opts: {
     return { row: null, invalid: true };
   }
 
-  writeCachedNormalizedSnapshotRowGlobal(
-    opts.globalCache,
-    opts.candidate,
-    row.body_json,
-    bodyJson,
-  );
+  writeCachedNormalizedSnapshotRowGlobal(opts.globalCache, opts.candidate, row.body_json, bodyJson);
   return {
     row: writeCachedNormalizedSnapshotRow(
       opts.cacheByDb,
@@ -818,9 +812,10 @@ async function readPreferredSnapshotCandidate(opts: {
     return { row: null, age: null, invalid: false };
   }
 
-  const age = opts.key === SNAPSHOT_ARTIFACT_KEY
-    ? snapshotCandidateUpdatedAgeSeconds(candidate, opts.now)
-    : snapshotCandidateAgeSeconds(candidate, opts.now);
+  const age =
+    opts.key === SNAPSHOT_ARTIFACT_KEY
+      ? snapshotCandidateUpdatedAgeSeconds(candidate, opts.now)
+      : snapshotCandidateAgeSeconds(candidate, opts.now);
   if (age > opts.maxAgeSeconds) {
     return { row: null, age, invalid: false };
   }
@@ -947,7 +942,9 @@ export async function readHomepageSnapshotGeneratedAt(
   db: D1Database,
   now = Math.floor(Date.now() / 1000),
 ): Promise<number | null> {
-  const candidates = listSnapshotCandidatesFromRefreshRows(await readRefreshSnapshotMetadataRows(db))
+  const candidates = listSnapshotCandidatesFromRefreshRows(
+    await readRefreshSnapshotMetadataRows(db),
+  )
     .filter((candidate) => !isFutureSnapshotCandidate(candidate, now))
     .sort(comparePayloadCandidates);
 
@@ -1055,7 +1052,9 @@ export function readCachedHomepageRefreshBaseSnapshot(
     return null;
   }
 
-  const toCandidate = (key: SnapshotKey): (SnapshotCandidate & { row: ParsedSnapshotRow }) | null => {
+  const toCandidate = (
+    key: SnapshotKey,
+  ): (SnapshotCandidate & { row: ParsedSnapshotRow }) | null => {
     const row = cache.get(key);
     if (!row) {
       return null;
@@ -1102,7 +1101,10 @@ export function readCachedHomepageRefreshBaseSnapshot(
   }
 
   const freshestBase = [homepageCandidate, artifactCandidate]
-    .filter((candidate): candidate is SnapshotCandidate & { row: ParsedSnapshotRow } => candidate !== null)
+    .filter(
+      (candidate): candidate is SnapshotCandidate & { row: ParsedSnapshotRow } =>
+        candidate !== null,
+    )
     .sort(comparePayloadCandidates)[0];
   if (!freshestBase) {
     return null;
